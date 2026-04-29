@@ -1,9 +1,11 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import { MAX_BET, MIN_BET, MIN_MULTIPLIER, MAX_MULTIPLIER } from "../lib/constants";
+import { MAX_BET, MIN_BET, MIN_MULTIPLIER, MAX_MULTIPLIER, HOUSE_EDGE } from "../lib/constants";
 import { generateMultiplier, fmt, winChance } from "../lib/game-logic";
 import { AudioEngine } from "../lib/audio";
+import GameInfoModal from "./GameInfoModal";
+import ProvablyFairModal from "./ProvablyFairModal";
 
 type GameResult = {
   id: number;
@@ -26,6 +28,13 @@ export default function LimboApp() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [wins, setWins] = useState(0);
   const [losses, setLosses] = useState(0);
+  const [mode, setMode] = useState<"manual" | "auto">("manual");
+  const [gameInfoOpen, setGameInfoOpen] = useState(false);
+  const [pfModalOpen, setPfModalOpen] = useState(false);
+  const [gamePhase, setGamePhase] = useState<"idle" | "counting" | "result">("idle");
+  const [showPayout, setShowPayout] = useState<string | null>(null);
+  const [particles, setParticles] = useState<{id: number; x: number; y: number; tx: number; ty: number}[]>([]);
+  const [alert, setAlert] = useState<string | null>(null);
 
   // Auto play
   const [autoRunning, setAutoRunning] = useState(false);
@@ -49,34 +58,45 @@ export default function LimboApp() {
 
     if (!isFinite(betAmt) || betAmt < MIN_BET || betAmt > MAX_BET) return;
     if (!isFinite(target) || target < MIN_MULTIPLIER || target > MAX_MULTIPLIER) return;
-    if (betAmt > balanceRef.current) return;
+    if (betAmt > balanceRef.current) {
+      setAlert("Insufficient balance");
+      setTimeout(() => setAlert(null), 2500);
+      return;
+    }
+    if (balanceRef.current <= 0) {
+      setAlert("You're out of balance");
+      setTimeout(() => setAlert(null), 2500);
+      return;
+    }
 
-    setIsPlaying(true);
+    // Reset everything immediately
     setResultMultiplier(null);
     setLastWon(null);
+    setAnimatingValue(0);
+    setIsPlaying(true);
 
+    await new Promise(r => setTimeout(r, 30));
+
+    setGamePhase("counting");
     const newBal = balanceRef.current - betAmt;
     setBalance(newBal);
     balanceRef.current = newBal;
     audioRef.current?.sndBet();
 
-    // Animate the multiplier spinning
-    const animDuration = 600;
-    const animStart = Date.now();
-    const animInterval = setInterval(() => {
-      const elapsed = Date.now() - animStart;
-      if (elapsed >= animDuration) {
-        clearInterval(animInterval);
-        return;
-      }
-      setAnimatingValue(+(Math.random() * 10 + 1).toFixed(2));
-    }, 50);
-
     const result = await generateMultiplier();
 
-    // Wait for animation to finish
-    await new Promise(r => setTimeout(r, Math.max(0, animDuration - (Date.now() - animStart))));
-    clearInterval(animInterval);
+    // Fast count — 300ms total, 10 steps
+    const steps = 10;
+    const stepTime = 30;
+
+    for (let i = 0; i <= steps; i++) {
+      const progress = i / steps;
+      const eased = 1 - Math.pow(1 - progress, 2);
+      const current = 1 + (result - 1) * eased;
+      setAnimatingValue(+current.toFixed(2));
+      if (i % 2 === 0) audioRef.current?.sndTick(progress);
+      if (i < steps) await new Promise(r => setTimeout(r, stepTime));
+    }
     setAnimatingValue(null);
 
     const won = result >= target;
@@ -99,7 +119,32 @@ export default function LimboApp() {
 
     setResultMultiplier(result);
     setLastWon(won);
+    setGamePhase("result");
     setIsPlaying(false);
+
+    if (won) {
+      // Floating payout
+      setShowPayout(`+${fmt(payout)}`);
+      setTimeout(() => setShowPayout(null), 1200);
+
+      // Particles burst
+      const newParticles = Array.from({ length: 14 }, (_, i) => {
+        const angle = ((360 / 14) * i + Math.random() * 25) * (Math.PI / 180);
+        const dist = 60 + Math.random() * 50;
+        return {
+          id: Date.now() + i,
+          x: 50,
+          y: 50,
+          tx: Math.cos(angle) * dist,
+          ty: Math.sin(angle) * dist,
+        };
+      });
+      setParticles(newParticles);
+      setTimeout(() => setParticles([]), 800);
+    }
+
+    // Reset phase after animation plays
+    setTimeout(() => setGamePhase("idle"), 800);
 
     gameIdRef.current++;
     const entry: GameResult = {
@@ -146,198 +191,353 @@ export default function LimboApp() {
   };
 
   const chance = winChance(parseFloat(targetMultiplier) || 2);
-  const displayValue = animatingValue !== null
+  const displayValue = animatingValue !== null && animatingValue > 0
     ? animatingValue.toFixed(2)
     : resultMultiplier !== null
       ? resultMultiplier.toFixed(2)
-      : "0.00";
+      : "1.00";
 
   const resultClass = lastWon === true ? "result-win" : lastWon === false ? "result-lose" : "";
 
+  const handleSoundToggle = () => {
+    const e = audioRef.current?.toggle() ?? true;
+    setSoundEnabled(e);
+  };
+
   return (
+  <>
     <div className="app">
       {/* Header */}
-      <header className="header">
+      <div className="header">
         <div className="header-left">
-          <span className="game-name">
-            <span className="ico">&#x221E;</span>
+          <div className="game-name">
+            <span className="ico">{"\u221E"}</span>
             <span>Limbo</span>
-          </span>
+          </div>
         </div>
         <div className="header-balance">
-          <span className="header-bal-icon">&#x1F4B0;</span>
+          <span className="header-bal-icon">{"\uD83D\uDCB0"}</span>
           <span className="header-bal-value">{fmt(balance)}</span>
         </div>
         <div className="header-right">
-          <div className="stats">
-            <span className="stat-win">W: {wins}</span>
-            <span className="stat-lose">L: {losses}</span>
+          <div className="fairplay" onClick={() => setPfModalOpen(true)}>
+            Fair Play
           </div>
-          <button className="sound-btn" onClick={() => {
-            const e = audioRef.current?.toggle() ?? true;
-            setSoundEnabled(e);
-          }}>
-            {soundEnabled ? "\u{1F50A}" : "\u{1F507}"}
-          </button>
+          <div className="info" onClick={() => setGameInfoOpen(true)}>
+            i
+          </div>
         </div>
-      </header>
+      </div>
 
       <div className="row">
         {/* Side Panel */}
         <aside className="side">
-          {/* Bet Amount */}
-          <div className="field">
-            <label className="label">Bet Amount</label>
-            <div className="input-row">
-              <span className="currency">$</span>
-              <input
-                type="number"
-                value={bet}
-                onChange={e => setBet(e.target.value)}
-                disabled={isPlaying || autoRunning}
-                min={MIN_BET}
-                max={MAX_BET}
-                step="0.01"
-              />
-              <div className="chips">
-                <button className="chip" onClick={() => setBet(prev => Math.max(MIN_BET, parseFloat(prev) / 2).toFixed(2))} disabled={isPlaying || autoRunning}>&#xBD;</button>
-                <button className="chip" onClick={() => setBet(prev => Math.min(balanceRef.current, MAX_BET, parseFloat(prev) * 2).toFixed(2))} disabled={isPlaying || autoRunning}>2x</button>
-                <button className="chip" onClick={() => setBet(Math.min(balanceRef.current, MAX_BET).toFixed(2))} disabled={isPlaying || autoRunning}>Max</button>
-              </div>
-            </div>
-          </div>
-
-          {/* Target Multiplier */}
-          <div className="field">
-            <label className="label">Target Multiplier</label>
-            <div className="input-row target-input">
-              <input
-                type="number"
-                value={targetMultiplier}
-                onChange={e => setTargetMultiplier(e.target.value)}
-                disabled={isPlaying || autoRunning}
-                min={MIN_MULTIPLIER}
-                max={MAX_MULTIPLIER}
-                step="0.01"
-              />
-              <span className="currency">x</span>
-            </div>
-          </div>
-
-          {/* Quick targets */}
-          <div className="quick-targets">
-            {[1.5, 2, 3, 5, 10, 50].map(t => (
-              <button
-                key={t}
-                className={`target-chip ${parseFloat(targetMultiplier) === t ? 'selected' : ''}`}
-                onClick={() => setTargetMultiplier(t.toFixed(2))}
-                disabled={isPlaying || autoRunning}
-              >
-                {t}x
-              </button>
-            ))}
-          </div>
-
-          {/* Win Chance */}
-          <div className="chance-display">
-            <span className="label">Win Chance</span>
-            <span className="chance-value">{chance.toFixed(2)}%</span>
-          </div>
-
-          {/* Potential Payout */}
-          <div className="chance-display">
-            <span className="label">Payout on Win</span>
-            <span className="payout-value">{fmt(parseFloat(bet || "0") * parseFloat(targetMultiplier || "0"))}</span>
-          </div>
-
-          {/* Play Button */}
-          {!autoRunning && (
+          {/* Mode Toggle */}
+          <div className="mode-toggle">
             <button
-              className="place-btn"
-              onClick={playRound}
-              disabled={isPlaying}
+              className={mode === "manual" ? "active" : ""}
+              onClick={() => setMode("manual")}
+              disabled={autoRunning}
             >
-              {isPlaying ? "Rolling..." : "BET"}
+              Manual
             </button>
+            <button
+              className={mode === "auto" ? "active" : ""}
+              onClick={() => setMode("auto")}
+              disabled={autoRunning}
+            >
+              Auto
+            </button>
+          </div>
+
+          {/* === MANUAL TAB === */}
+          {mode === "manual" && (
+            <div className="tab-panel">
+              <div className="field">
+                <label className="label">Bet Amount</label>
+                <div className="input-row">
+                  <span className="currency">$</span>
+                  <input
+                    type="number"
+                    value={bet}
+                    onChange={e => setBet(e.target.value)}
+                    disabled={isPlaying}
+                    min={MIN_BET}
+                    max={MAX_BET}
+                    step="0.01"
+                  />
+                  <div className="chips">
+                    <button className="chip" onClick={() => setBet(prev => Math.max(MIN_BET, parseFloat(prev) / 2).toFixed(2))} disabled={isPlaying}>&#xBD;</button>
+                    <button className="chip" onClick={() => setBet(prev => Math.min(balanceRef.current, MAX_BET, parseFloat(prev) * 2).toFixed(2))} disabled={isPlaying}>2x</button>
+                    <button className="chip" onClick={() => setBet(Math.min(balanceRef.current, MAX_BET).toFixed(2))} disabled={isPlaying}>Max</button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="field">
+                <label className="label">Target Multiplier</label>
+                <div className="input-row target-input">
+                  <input
+                    type="number"
+                    value={targetMultiplier}
+                    onChange={e => setTargetMultiplier(e.target.value)}
+                    disabled={isPlaying}
+                    min={MIN_MULTIPLIER}
+                    max={MAX_MULTIPLIER}
+                    step="0.01"
+                  />
+                  <span className="currency">x</span>
+                </div>
+              </div>
+
+              <div className="side-stats">
+                <div className="stat-box">
+                  <span className="stat-label">Win Chance</span>
+                  <span className="stat-val accent">{chance.toFixed(2)}%</span>
+                </div>
+                <div className="stat-box">
+                  <span className="stat-label">Payout</span>
+                  <span className="stat-val green">{fmt(parseFloat(bet || "0") * parseFloat(targetMultiplier || "0"))}</span>
+                </div>
+              </div>
+
+              <button
+                className="place-btn"
+                onClick={playRound}
+                disabled={isPlaying}
+              >
+                {isPlaying ? "Rolling..." : "BET"}
+              </button>
+            </div>
           )}
 
-          {/* Auto Play Section */}
-          <div className="auto-section">
-            <span className="auto-section-label">Auto Play</span>
-            <div className="auto-row">
-              <label className="label small">Rounds</label>
-              <input
-                type="number"
-                className="auto-input"
-                value={autoRounds}
-                onChange={e => setAutoRounds(e.target.value)}
-                disabled={autoRunning}
-                min={1}
-                max={1000}
-              />
-            </div>
-            {autoRunning ? (
-              <>
-                <div className="auto-progress-text">
-                  Round {autoPlayed}/{autoRounds}
+          {/* === AUTO TAB === */}
+          {mode === "auto" && (
+            <div className="tab-panel">
+              <div className="field">
+                <label className="label">Bet Amount</label>
+                <div className="input-row">
+                  <span className="currency">$</span>
+                  <input
+                    type="number"
+                    value={bet}
+                    onChange={e => setBet(e.target.value)}
+                    disabled={autoRunning}
+                    min={MIN_BET}
+                    max={MAX_BET}
+                    step="0.01"
+                  />
+                  <div className="chips">
+                    <button className="chip" onClick={() => setBet(prev => Math.max(MIN_BET, parseFloat(prev) / 2).toFixed(2))} disabled={autoRunning}>&#xBD;</button>
+                    <button className="chip" onClick={() => setBet(prev => Math.min(balanceRef.current, MAX_BET, parseFloat(prev) * 2).toFixed(2))} disabled={autoRunning}>2x</button>
+                    <button className="chip" onClick={() => setBet(Math.min(balanceRef.current, MAX_BET).toFixed(2))} disabled={autoRunning}>Max</button>
+                  </div>
                 </div>
-                <button className="stop-btn" onClick={stopAuto}>Stop</button>
-              </>
-            ) : (
-              <button className="auto-start-btn" onClick={startAuto} disabled={isPlaying}>
-                Start Auto
-              </button>
-            )}
-          </div>
+              </div>
+
+              <div className="field">
+                <label className="label">Target Multiplier</label>
+                <div className="input-row target-input">
+                  <input
+                    type="number"
+                    value={targetMultiplier}
+                    onChange={e => setTargetMultiplier(e.target.value)}
+                    disabled={autoRunning}
+                    min={MIN_MULTIPLIER}
+                    max={MAX_MULTIPLIER}
+                    step="0.01"
+                  />
+                  <span className="currency">x</span>
+                </div>
+              </div>
+
+              <div className="side-stats">
+                <div className="stat-box">
+                  <span className="stat-label">Win Chance</span>
+                  <span className="stat-val accent">{chance.toFixed(2)}%</span>
+                </div>
+              </div>
+
+              <div className="auto-section">
+                <span className="auto-section-label">Auto Settings</span>
+                <div className="auto-row">
+                  <label className="label small">Rounds</label>
+                  <input
+                    type="number"
+                    className="auto-input"
+                    value={autoRounds}
+                    onChange={e => setAutoRounds(e.target.value)}
+                    disabled={autoRunning}
+                    min={1}
+                    max={1000}
+                  />
+                </div>
+              </div>
+
+              {autoRunning && (
+                <div className="auto-progress-bar-wrap">
+                  <div className="auto-progress-text">
+                    Round {autoPlayed} / {autoRounds}
+                  </div>
+                  <div className="auto-progress-bar">
+                    <div
+                      className="auto-progress-fill"
+                      style={{ width: `${(autoPlayed / (parseInt(autoRounds) || 1)) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {autoRunning ? (
+                <button className="stop-btn" onClick={stopAuto}>Stop Auto</button>
+              ) : (
+                <button className="auto-start-btn" onClick={startAuto} disabled={isPlaying}>
+                  Start Auto
+                </button>
+              )}
+            </div>
+          )}
         </aside>
 
-        {/* Main Area */}
         <main className="main">
-          <div className="game-area">
-            {/* Result Display */}
-            <div className={`result-display ${resultClass} ${animatingValue !== null ? 'animating' : ''}`}>
-              <span className="result-value">{displayValue}x</span>
+          {/* Recent Games — horizontal strip under header */}
+          <div className="history-bar">
+            {history.length === 0 ? (
+              <span className="history-empty">No games yet</span>
+            ) : (
+              history.map(h => (
+                <span key={h.id} className={`history-chip ${h.won ? 'hc-win' : 'hc-lose'}`}>
+                  {h.result.toFixed(2)}x
+                </span>
+              ))
+            )}
+          </div>
+
+          <div className={`game-area phase-${gamePhase} ${resultClass}`}>
+            {/* Ambient background */}
+            <div className="bg-ambient">
+              <div className="stars" />
+              <div className="nebula n1" />
+              <div className="nebula n2" />
+              <div className="infinity-ring ring-1" />
+              <div className="infinity-ring ring-2" />
+              <div className="infinity-ring ring-3" />
+              <div className={`energy-wave ${gamePhase === 'counting' ? 'active' : ''}`} />
+              <div className={`energy-wave wave-2 ${gamePhase === 'counting' ? 'active' : ''}`} />
             </div>
 
-            {/* Multiplier arc/meter visual */}
-            <div className="meter-container">
-              <div className="meter-track">
-                <div
-                  className="meter-fill"
-                  style={{
-                    width: resultMultiplier !== null
-                      ? `${Math.min(100, (resultMultiplier / (parseFloat(targetMultiplier) || 2)) * 50)}%`
-                      : '0%'
-                  }}
-                />
-                <div
-                  className="meter-target"
-                  style={{ left: '50%' }}
-                >
-                  <span className="meter-target-label">{parseFloat(targetMultiplier || "2").toFixed(2)}x</span>
+            {/* Background flash on result */}
+            {gamePhase === "result" && lastWon && <div className="bg-flash win" />}
+
+            {/* Ripple rings on result */}
+            {gamePhase === "result" && (
+              <>
+                <div className={`ripple ${resultClass}`} />
+                <div className={`ripple ripple-2 ${resultClass}`} />
+              </>
+            )}
+
+            <div className="cube-wrap">
+              <div className={`cube-track ${resultClass} phase-${gamePhase}`}>
+                {(() => {
+                  const tgt = parseFloat(targetMultiplier) || 2;
+                  const val = animatingValue !== null && animatingValue > 0
+                    ? animatingValue
+                    : resultMultiplier !== null
+                      ? resultMultiplier
+                      : 1;
+                  const fillPct = tgt <= 1 ? 0 : Math.max(0, Math.min(100, ((val - 1) / (tgt - 1)) * 100));
+                  return (
+                    <>
+                      <div
+                        className={`cube-fill ${resultClass} ${animatingValue !== null ? 'animating' : ''}`}
+                        style={{ height: `${fillPct}%` }}
+                      />
+                      {fillPct > 0 && (
+                        <div
+                          className={`cube-indicator ${resultClass} ${animatingValue !== null ? 'animating' : ''}`}
+                          style={{ bottom: `${fillPct}%` }}
+                        />
+                      )}
+                    </>
+                  );
+                })()}
+                <div className={`cube-value ${resultClass} ${animatingValue !== null ? 'animating' : ''} phase-${gamePhase}`}>
+                  {displayValue}x
                 </div>
-              </div>
-            </div>
 
-            {/* History */}
-            <div className="history">
-              <div className="history-title">Recent Games</div>
-              <div className="history-list">
-                {history.length === 0 && <div className="history-empty">No games yet</div>}
-                {history.map(h => (
-                  <div key={h.id} className={`history-item ${h.won ? 'h-win' : 'h-lose'}`}>
-                    <span className="h-result">{h.result.toFixed(2)}x</span>
-                    <span className="h-target">/{h.target.toFixed(2)}x</span>
-                    <span className={`h-payout ${h.won ? 'h-payout-win' : ''}`}>
-                      {h.won ? `+${fmt(h.payout)}` : `-${fmt(h.bet)}`}
-                    </span>
-                  </div>
+                {/* Particles on win */}
+                {particles.map(p => (
+                  <div
+                    key={p.id}
+                    className="particle"
+                    style={{
+                      left: `${p.x}%`,
+                      top: `${p.y}%`,
+                      '--tx': `${p.tx}px`,
+                      '--ty': `${p.ty}px`,
+                    } as React.CSSProperties}
+                  />
                 ))}
               </div>
+
+              {/* Floating payout text */}
+              {showPayout && (
+                <div className="payout-float">{showPayout}</div>
+              )}
             </div>
           </div>
         </main>
       </div>
+
+      {/* Bottom Bar — same as tower-game */}
+      <div className="bottom">
+        <div className="bottom-icons">
+          <div
+            className={`ic sound-toggle${!soundEnabled ? " muted" : ""}`}
+            title="Toggle Sound"
+            onClick={handleSoundToggle}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+              <path
+                className="sound-waves"
+                d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"
+                style={{ display: soundEnabled ? undefined : "none" }}
+              />
+            </svg>
+          </div>
+          <div className="ic" title="Settings">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </div>
+          <div className="ic" title="Fullscreen">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6" />
+            </svg>
+          </div>
+          <div className="ic" title="Favorite">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+            </svg>
+          </div>
+        </div>
+        <div className="bottom-logo">MYBC</div>
+      </div>
+
     </div>
+
+    {alert && !gameInfoOpen && !pfModalOpen && (
+      <div className="alert-toast">
+        <span className="alert-icon">&#x26A0;</span>
+        {alert}
+      </div>
+    )}
+
+    <GameInfoModal open={gameInfoOpen} onClose={() => setGameInfoOpen(false)} />
+    <ProvablyFairModal open={pfModalOpen} onClose={() => setPfModalOpen(false)} />
+  </>
   );
 }

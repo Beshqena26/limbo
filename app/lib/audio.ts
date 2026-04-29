@@ -29,9 +29,34 @@ export class AudioEngine {
     } catch {}
   }
 
-  sndBet() { this.play(220, 0.15, 'sine', 0.1); }
-  sndWin() { this.play(880, 0.3, 'sine', 0.15); this.play(1100, 0.3, 'sine', 0.1); }
-  sndLose() { this.play(150, 0.4, 'triangle', 0.12); }
-  sndClick() { this.play(600, 0.08, 'square', 0.05); }
-  sndBigWin() { this.play(880, 0.5, 'sine', 0.2); setTimeout(() => this.play(1320, 0.5, 'sine', 0.15), 150); }
+  /** Short tick that rises in pitch as progress increases (0..1) */
+  sndTick(progress: number) {
+    const freq = 300 + progress * 600; // 300Hz -> 900Hz
+    this.play(freq, 0.04, 'sine', 0.06);
+  }
+
+  sndBet() { this.play(250, 0.12, 'sine', 0.08); }
+
+  sndWin() {
+    this.play(660, 0.15, 'sine', 0.12);
+    setTimeout(() => this.play(880, 0.15, 'sine', 0.12), 80);
+    setTimeout(() => this.play(1100, 0.25, 'sine', 0.14), 160);
+    setTimeout(() => this.play(1320, 0.35, 'sine', 0.10), 260);
+  }
+
+  sndBigWin() {
+    this.play(660, 0.15, 'sine', 0.15);
+    setTimeout(() => this.play(880, 0.15, 'sine', 0.15), 80);
+    setTimeout(() => this.play(1100, 0.2, 'sine', 0.15), 160);
+    setTimeout(() => this.play(1320, 0.2, 'sine', 0.15), 240);
+    setTimeout(() => this.play(1540, 0.4, 'sine', 0.18), 320);
+    setTimeout(() => this.play(1760, 0.5, 'sine', 0.12), 420);
+  }
+
+  sndLose() {
+    this.play(200, 0.25, 'sine', 0.08);
+    setTimeout(() => this.play(160, 0.3, 'sine', 0.06), 100);
+  }
+
+  sndClick() { this.play(500, 0.06, 'square', 0.04); }
 }
